@@ -85,3 +85,20 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 const port = process.env.PORT || 5000;
 app.listen(port, () => console.log(`✅ Server running on http://localhost:${port}`));
+const express = require('express');
+const app = express();
+
+// allow Railway's PORT env var
+const PORT = process.env.PORT || 5000;
+
+// (your existing middleware / routes here)
+// e.g. app.use('/api', apiRouter);
+
+// simple health/root route:
+app.get('/', (req, res) => {
+  res.send('✅ ApartmentApp backend is running');
+});
+
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
