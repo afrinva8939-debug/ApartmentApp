@@ -1,67 +1,57 @@
-// my-react-app/src/pages/ResultsPage.js
+// src/pages/ResultsPage.js
 import React, { useEffect, useState } from 'react';
 
-export default function ResultsPage() {
+export default function ResultsPage({ initialFilters }) {
+  // initialFilters can come from URL or parent
+  const [filters, setFilters] = useState({ bath: 1, beds: 2, ...initialFilters });
+  const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState([]);
   const [error, setError] = useState(null);
 
-  // Example: read query string from browser (e.g. ?bath=1&beds=2)
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const bath = params.get('bath');
-    const beds = params.get('beds');
-
-    // Call API
-    const fetchResults = async () => {
+    async function fetchResults() {
       setLoading(true);
       setError(null);
       try {
-        // Build search params server-side expect e.g. /api/results?bath=1&beds=2
-        const q = new URLSearchParams();
-        if (bath) q.set('bath', bath);
-        if (beds) q.set('beds', beds);
-        q.set('limit', '100');
+        const params = new URLSearchParams();
+        if (filters.bath !== undefined) params.set('bath', filters.bath);
+        if (filters.beds !== undefined) params.set('beds', filters.beds);
 
-        const res = await fetch(`/api/results?${q.toString()}`);
-        if (!res.ok) {
-          const txt = await res.text();
-          throw new Error(`API error ${res.status}: ${txt}`);
+        const url = `/api/results?${params.toString()}`;
+        const resp = await fetch(url);
+        if (!resp.ok) {
+          const txt = await resp.text();
+          throw new Error(`HTTP ${resp.status}: ${txt}`);
         }
-        const data = await res.json();
+        const data = await resp.json();
         if (!data.ok) {
-          throw new Error(data.error || 'Unknown API error');
+          setError(data.error || 'Unknown API error');
+          setRows([]);
+        } else {
+          setRows(data.rows || []);
         }
-        setResults(data.results || []);
       } catch (err) {
         setError(err.message || String(err));
-        setResults([]);
       } finally {
         setLoading(false);
       }
-    };
-
+    }
     fetchResults();
-  }, []);
+  }, [filters]);
 
   return (
-    <div style={{ padding: 24 }}>
+    <div>
       <h1>Search Results</h1>
-      {loading && <p>Loading results…</p>}
-      {error && (
-        <div style={{ color: 'red' }}>
-          <strong>Error:</strong> {error}
-        </div>
-      )}
-      {!loading && results.length === 0 && <p>No apartments found.</p>}
+      <p>Filters: {JSON.stringify(filters)}</p>
+      {loading && <p>Loading…</p>}
+      {error && <pre style={{ color: 'red' }}>{error}</pre>}
+      {!loading && !error && rows.length === 0 && <p>No results</p>}
       <ul>
-        {results.map((r) => (
-          <li key={r.id}>
-            <strong>{r.apt_result_apartment_name || r.refid || r.id}</strong>
+        {rows.map(r => (
+          <li key={r.id || r.refid}>
+            <strong>{r.apt_result_apartment_name || r.refid}</strong>
             <div>{r.apt_result_address}</div>
-            <div>
-              beds: {r.beds ?? '-'} • bath: {r.bath ?? '-'}
-            </div>
+            <div>Beds: {r.beds}, Baths: {r.bath}</div>
           </li>
         ))}
       </ul>
