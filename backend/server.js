@@ -1,151 +1,128 @@
-// server.js (drop into backend/)
-require('dotenv').config();
+// server.js — FINAL VERSION
+// Run with: node server.js  (or npx nodemon server.js)
+// Requires: npm i express mysql2 dotenv cors
+
 const express = require('express');
-const path = require('path');
 const mysql = require('mysql2/promise');
+const path = require('path');
 const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- Sample fallback data (used if DB not available) ---
-const SAMPLE_ROWS = [
-  // Minimal example objects; add fields your front-end expects
-  { id: 1, refid: 'REF1001', apt_result_apartment_name: 'Sample Apartments', apt_result_address: '123 Example St', apt_result_bed: '2 Bed', apt_result_bath: '2 Bath' },
-  { id: 2, refid: 'REF1002', apt_result_apartment_name: 'Sample Towers', apt_result_address: '456 Demo Ave', apt_result_bed: '1 Bed', apt_result_bath: '1 Bath' }
-];
+const PUBLIC_DIR = path.join(__dirname, 'public');
+app.use(express.static(PUBLIC_DIR));
 
-// --- DB pool init ---
-let pool = null;
-async function makePoolFromEnv() {
+let pool;
+
+// === Initialize MySQL connection ===
+async function initDb() {
   const cfg = {
-    host: process.env.DB_HOST || process.env.MYSQL_HOST || 'localhost',
-    port: process.env.DB_PORT ? Number(process.env.DB_PORT) : (process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306),
-    user: process.env.DB_USER || process.env.MYSQL_USER || 'root',
-    password: process.env.DB_PASSWORD || process.env.MYSQL_PASSWORD || '',
-    database: process.env.DB_NAME || process.env.MYSQL_DATABASE || 'apartments',
+    host: process.env.DB_HOST || 'localhost',
+    port: process.env.DB_PORT ? Number(process.env.DB_PORT) : 3306,
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'apartments',
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0
+    queueLimit: 0,
   };
-  pool = mysql.createPool(cfg);
-  // test connection once
+
   try {
+    pool = mysql.createPool(cfg);
     await pool.query('SELECT 1');
     console.log('✅ MySQL pool ready');
   } catch (err) {
-    console.warn('⚠️ Cannot connect to MySQL (will use sample data):', err.message);
+    console.error('❌ DB connection failed:', err.message);
     pool = null;
   }
 }
-makePoolFromEnv().catch(err => {
-  console.warn('makePoolFromEnv err', err);
-  pool = null;
-});
 
-// === Helpers: whitelist allowed filters and map query param -> DB column ===
-// If your DB column names differ from the query params, change the map below.
+initDb();
+
+// === Allowed filter mapping ===
 const allowedFilters = {
-  // queryParam : columnNameInDB
-  bath: 'apt_result_bath',   // /api/results?bath=1  -> column apt_result_bath
-  beds: 'apt_result_bed',    // /api/results?beds=2  -> column apt_result_bed
+  beds: 'apt_result_bed',
+  bath: 'apt_result_bath',
   refid: 'refid',
   group_name: 'group_name',
-  // add more mappings if your DB has different column names
 };
 
-// Build WHERE clause and values array safely
+// === Helper to build WHERE clause ===
 function buildWhereFromQuery(q) {
   const clauses = [];
   const values = [];
+
   for (const [param, column] of Object.entries(allowedFilters)) {
-    if (q[param] !== undefined && q[param] !== '') {
-      // we treat values as strings; if you have numeric fields you can coerce as needed
+    const val = q[param];
+    if (!val) continue;
+
+    // Extract numeric values inside DB (since stored as "2 Bed", "1 Bath")
+    if (param === 'beds' || param === 'bath') {
+      clauses.push(`CAST(SUBSTRING_INDEX(${column}, ' ', 1) AS UNSIGNED) = ?`);
+      values.push(Number(val));
+    } else {
       clauses.push(`${column} = ?`);
-      values.push(q[param]);
+      values.push(val);
     }
   }
-  const where = clauses.length ? ('WHERE ' + clauses.join(' AND ')) : '';
+
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
   return { where, values };
 }
 
-// --- API: test route ---
+// === Test endpoint ===
 app.get('/api/test-apartments', async (req, res) => {
-  if (!pool) {
-    return res.json({ ok: true, source: 'sample', rows: SAMPLE_ROWS });
-  }
   try {
-    const [rows] = await pool.query('SELECT id, refid, apt_result_apartment_name, apt_result_address, apt_result_bed, apt_result_bath FROM apartment_details LIMIT 500');
-    return res.json({ ok: true, source: 'db', rows });
+    if (!pool) return res.json({ ok: true, source: 'sample', rows: [] });
+    const [rows] = await pool.query(
+      `SELECT id, refid, apt_result_apartment_name, apt_result_address, apt_result_bed, apt_result_bath
+       FROM apartment_details
+       LIMIT 500`
+    );
+    res.json({ ok: true, source: 'db', rows });
   } catch (err) {
-    console.error('DB test query error:', err.message);
-    return res.json({ ok: false, source: 'db', error: err.message });
+    console.error('DB error:', err.message);
+    res.json({ ok: false, error: err.message });
   }
 });
 
-// --- API: results route (query filters) ---
-// Example: /api/results?bath=1&beds=2
+// === Results endpoint ===
 app.get('/api/results', async (req, res) => {
-  // Build WHERE clause from allowed query params
-  const { where, values } = buildWhereFromQuery(req.query);
-
-  // Build SQL (select columns you need)
-  const sql = `SELECT * FROM apartment_details ${where} LIMIT 500`;
-
-  if (!pool) {
-    // no DB: return filtered sample rows (apply a very simple filter to mimic behavior)
-    const filtered = SAMPLE_ROWS.filter(r => {
-      for (const [param, col] of Object.entries(allowedFilters)) {
-        if (req.query[param] !== undefined && req.query[param] !== '') {
-          // compare as string (simple)
-          if (String((r[col] !== undefined ? r[col] : r[param] || '')).indexOf(String(req.query[param])) === -1) {
-            return false;
-          }
-        }
-      }
-      return true;
-    });
-    return res.json({ ok: true, source: 'sample', rows: filtered });
-  }
-
   try {
+    if (!pool) return res.json({ ok: false, error: 'No DB connection' });
+
+    const { where, values } = buildWhereFromQuery(req.query);
+    const sql = `SELECT * FROM apartment_details ${where} LIMIT 500`;
+
     const [rows] = await pool.query(sql, values);
-    return res.json({ ok: true, source: 'db', rows });
+    res.json({ ok: true, source: 'db', rows });
   } catch (err) {
-    console.error('Query error:', err);
-    return res.json({ ok: false, error: err.message });
+    console.error('Query error:', err.message);
+    res.json({ ok: false, error: err.message });
   }
 });
 
-// --- Serve frontend static build / public folder ---
-const PUB = path.join(__dirname, 'public');
-app.use(express.static(PUB));
-// fallback for client-side routing: send index.html for unknown non-API requests
+// === Default route for index.html ===
 app.get('*', (req, res) => {
-  // if the request begins with /api, return 404
-  if (req.path.startsWith('/api')) {
-    return res.status(404).json({ ok: false, error: 'Not found' });
-  }
-  // otherwise serve client
-  const indexFile = path.join(PUB, 'index.html');
-  res.sendFile(indexFile, err => {
+  res.sendFile(path.join(PUBLIC_DIR, 'index.html'), (err) => {
     if (err) {
-      // if index.html missing, send a minimal placeholder
-      res
-        .status(200)
-        .send(`<html><body><h1>ApartmentApp — placeholder index.html</h1>
-          <p>This is a minimal placeholder so the server won't throw ENOENT.</p>
-          <p>To test the API visit: <ul>
-            <li><a href="/api/test-apartments">/api/test-apartments</a></li>
-            <li><a href="/api/results?bath=1&beds=2">/api/results?bath=1&beds=2</a></li>
-          </ul></p></body></html>`);
+      res.send(`<html><body>
+        <h1>ApartmentApp — Placeholder index.html</h1>
+        <p>Server running successfully.</p>
+        <ul>
+          <li><a href="/api/test-apartments">/api/test-apartments</a></li>
+          <li><a href="/api/results?beds=2&bath=1">/api/results?beds=2&bath=1</a></li>
+        </ul>
+      </body></html>`);
     }
   });
 });
 
-// --- Start server ---
-const PORT = process.env.PORT ? Number(process.env.PORT) : 5000;
+// === Start Server ===
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server started and listening on http://localhost:${PORT}`);
 });
